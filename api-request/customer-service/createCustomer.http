@@ -1,0 +1,12 @@
+POST localhost:8084/api/customers
+Content-Type: application/json
+
+{
+  "firstName": "izuora",
+  "lastName": "divine",
+  "email": "dee@test.com",
+  "phoneNumber": "555-1111",
+  "address": "111 Pine St"
+}
+
+###

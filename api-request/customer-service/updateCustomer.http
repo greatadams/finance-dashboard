@@ -1,0 +1,13 @@
+PUT http://localhost:8084/api/customers/2
+Content-Type: application/json
+Accept: application/json
+
+{
+  "firstName": "updated name",
+  "lastName": "updated adamu",
+  "email": "adamuoke@gmail.com",
+  "address": "719 8th street",
+  "phoneNumber": "204-922-2361"
+}
+
+###

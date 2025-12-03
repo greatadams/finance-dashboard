@@ -1,0 +1,1 @@
+GET http://localhost:8083/api/analytics?customerId=20192&month=DECEMBER&year=2025

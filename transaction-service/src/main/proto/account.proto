@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+option java_multiple_files =true;
+option java_package = "com.pm.greatadamu.grpc.account";
+
+package account;
+
+//Account service -gRPC API
+
+
+//Validate if account exists
+service AccountService{
+  rpc ValidateAccount(ValidateAccountRequest) returns (ValidateAccountResponse);
+
+  // Get account balance
+  rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+
+  // Update account balance (debit or credit)
+  rpc UpdateBalance(UpdateBalanceRequest) returns (UpdateBalanceResponse);
+
+}
+
+// Request: Validate Account
+message ValidateAccountRequest {
+  int64 account_id = 1;
+}
+
+// Response: Validate Account
+message ValidateAccountResponse {
+  bool exists = 1;
+  bool is_active = 2;
+  string message = 3;
+}
+
+// Request: Get Balance
+message GetBalanceRequest {
+  int64 account_id = 1;
+}
+
+// Response: Get Balance
+message GetBalanceResponse {
+  string balance = 1;  // Using string to preserve decimal precision
+  string currency = 2;
+}
+
+// Request: Update Balance
+message UpdateBalanceRequest {
+  int64 account_id = 1;
+  string amount = 2;  // Using string to preserve decimal precision
+  OperationType operation = 3;
+  string description = 4;
+}
+
+// Response: Update Balance
+message UpdateBalanceResponse {
+  bool success = 1;
+  string new_balance = 2;
+  string message = 3;
+}
+
+// Operation Type enum
+enum OperationType {
+  DEBIT = 0;   // Subtract from balance
+  CREDIT = 1;  // Add to balance
+}

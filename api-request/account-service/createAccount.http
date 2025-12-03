@@ -1,0 +1,12 @@
+### GET request to example server
+POST http://localhost:8082/api/accounts
+Content-Type: application/json
+
+{
+  "customerId": 2,
+  "accountName": "Bob Checking",
+  "accountType": "CHECKING"
+}
+
+
+###

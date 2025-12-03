@@ -1,0 +1,12 @@
+PUT http://localhost:8082/api/accounts/1
+Content-Type: application/json
+
+{
+  "customerId": "20192",
+  "accountName": "great adamu updated",
+  "accountType": "SAVINGS"
+}
+
+
+
+###
