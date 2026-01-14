@@ -4,6 +4,7 @@ import com.pm.greatadamu.grpc.account.*;
 import com.pm.greatadamu.grpc.account.AccountServiceGrpc;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.grpc.StatusRuntimeException;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -11,6 +12,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
+import java.util.concurrent.TimeUnit;
 
 @Component
 @Slf4j
@@ -21,6 +23,9 @@ public class AccountGrpcClient {
 
     @Value("${grpc.account-service.port:9090}")
     private int accountServicePort;
+
+    @Value("2000")
+    private long deadlineMs;
 
     private ManagedChannel channel;
     private AccountServiceGrpc.AccountServiceBlockingStub blockingStub;
@@ -52,76 +57,88 @@ public class AccountGrpcClient {
      * Validate if account exists and is active
      */
     public ValidateAccountResponse validateAccount(Long accountId) {
-        log.info("gRPC Client: Validating account ID: {}", accountId);
+        try {
+            log.info("gRPC Client: Validating account ID: {}", accountId);
 
-        ValidateAccountRequest request = ValidateAccountRequest.newBuilder()
-                .setAccountId(accountId)
-                .build();
+            ValidateAccountRequest request = ValidateAccountRequest.newBuilder()
+                    .setAccountId(accountId)
+                    .build();
 
-        ValidateAccountResponse response = blockingStub.validateAccount(request);
+            //deadline
+            return blockingStub
+                    .withDeadlineAfter(deadlineMs, TimeUnit.MILLISECONDS)
+                    .validateAccount(request);
+        }catch (StatusRuntimeException e) {
+            // handle gRPC status errors
+            log.error("validateAccount failed: status={}, msg={}", e.getStatus(), e.getMessage());
+            throw e; // or translate into your service exception
+        }
 
-        log.info("gRPC Client: Validation result for account {}: exists={}, active={}",
-                accountId, response.getExists(), response.getIsActive());
-
-        return response;
     }
     /**
      * Get account balance
      */
     public GetBalanceResponse getBalance(Long accountId) {
-        log.info("gRPC Client: Getting balance for account ID: {}", accountId);
+        try {
+            GetBalanceRequest request = GetBalanceRequest.newBuilder()
+                    .setAccountId(accountId)
+                    .build();
 
-        GetBalanceRequest request = GetBalanceRequest.newBuilder()
-                .setAccountId(accountId)
-                .build();
+            // apply deadline
+            return blockingStub
+                    .withDeadlineAfter(deadlineMs, TimeUnit.MILLISECONDS)
+                    .getBalance(request);
 
-        GetBalanceResponse response = blockingStub.getBalance(request);
-
-        log.info("gRPC Client: Balance for account {}: {}", accountId, response.getBalance());
-
-        return response;
+        } catch (StatusRuntimeException e) {
+            log.error("getBalance failed: status={}, msg={}", e.getStatus(), e.getMessage());
+            throw e;
+        }
     }
 
     /**
      * Debit account (subtract from balance)
      */
     public UpdateBalanceResponse debitAccount(Long accountId, BigDecimal amount, String description) {
-        log.info("gRPC Client: Debiting {} from account ID: {}", amount, accountId);
+        try {
+            UpdateBalanceRequest request = UpdateBalanceRequest.newBuilder()
+                    .setAccountId(accountId)
+                    .setAmount(amount.toString())
+                    .setOperation(OperationType.DEBIT)
+                    .setDescription(description == null ? "" : description)
+                    .build();
 
-        UpdateBalanceRequest request = UpdateBalanceRequest.newBuilder()
-                .setAccountId(accountId)
-                .setAmount(amount.toString())
-                .setOperation(OperationType.DEBIT)
-                .setDescription(description)
-                .build();
+            //  apply deadline
+            return blockingStub
+                    .withDeadlineAfter(deadlineMs, TimeUnit.MILLISECONDS)
+                    .updateBalance(request);
 
-        UpdateBalanceResponse response = blockingStub.updateBalance(request);
-
-        log.info("gRPC Client: Debit result for account {}: success={}, new balance={}",
-                accountId, response.getSuccess(), response.getNewBalance());
-
-        return response;
+        } catch (StatusRuntimeException e) {
+            log.error("debitAccount failed: status={}, msg={}", e.getStatus(), e.getMessage());
+            throw e;
+        }
     }
 
     /**
      * Credit account (add to balance)
      */
     public UpdateBalanceResponse creditAccount(Long accountId, BigDecimal amount, String description) {
-        log.info("gRPC Client: Crediting {} to account ID: {}", amount, accountId);
+        try {
+            UpdateBalanceRequest request = UpdateBalanceRequest.newBuilder()
+                    .setAccountId(accountId)
+                    .setAmount(amount.toString())
+                    .setOperation(OperationType.CREDIT)
+                    .setDescription(description == null ? "" : description)
+                    .build();
 
-        UpdateBalanceRequest request = UpdateBalanceRequest.newBuilder()
-                .setAccountId(accountId)
-                .setAmount(amount.toString())
-                .setOperation(OperationType.CREDIT)
-                .setDescription(description)
-                .build();
+            // apply deadline
+            return blockingStub
+                    .withDeadlineAfter(deadlineMs, TimeUnit.MILLISECONDS)
+                    .updateBalance(request);
 
-        UpdateBalanceResponse response = blockingStub.updateBalance(request);
-
-        log.info("gRPC Client: Credit result for account {}: success={}, new balance={}",
-                accountId, response.getSuccess(), response.getNewBalance());
-
-        return response;
+        } catch (StatusRuntimeException e) {
+            log.error("creditAccount failed: status={}, msg={}", e.getStatus(), e.getMessage());
+            throw e;
+        }
     }
 
 }

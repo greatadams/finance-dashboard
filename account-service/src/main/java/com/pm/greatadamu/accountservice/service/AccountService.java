@@ -8,6 +8,9 @@ import com.pm.greatadamu.accountservice.model.Account;
 import com.pm.greatadamu.accountservice.repository.AccountRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.math.BigDecimal;
 
 
 @Service
@@ -57,4 +60,6 @@ public class AccountService {
         accountRepository.delete(account);
 
     }
+
+
 }

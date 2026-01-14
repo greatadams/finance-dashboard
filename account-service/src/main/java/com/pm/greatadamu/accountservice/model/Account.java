@@ -14,23 +14,35 @@ import java.time.LocalDateTime;
 @AllArgsConstructor
 @NoArgsConstructor
 @Builder
-@Table(name = "accounts")
+@Table(name = "accounts",
+        indexes = {
+                @Index(name = "idx_account_account_number", columnList = "accountNumber"),
+                @Index(name = "idx_account_customer_id", columnList = "customerId")
+        })
 public class Account {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+
+    @Version //  optimistic locking
+    private Long version;
+
+    @Column(nullable = false)
     private Long customerId;
 
+    @Column(nullable = false,precision=19,scale=2)
     private BigDecimal accountBalance;
 
     private String accountNumber;
 
     private String accountName;
 
+    @Column(nullable = false)
     @Enumerated(EnumType.STRING)
     private AccountType accountType;
 
+    @Column(nullable = false)
     @Enumerated(EnumType.STRING)
     private AccountStatus accountStatus;
 

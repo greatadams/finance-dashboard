@@ -3,7 +3,8 @@ package com.pm.greatadamu.authservice.model;
 import jakarta.persistence.*;
 import lombok.*;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
+
 
 
 @Entity
@@ -12,7 +13,12 @@ import java.time.LocalDateTime;
 @Builder
 @Getter
 @Setter
-@Table(name = "users")
+@Table(name = "users",
+indexes = {
+        @Index(name = "idx_users_email_normalized",columnList = "email_normalized")
+
+}
+)
 public class User {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -20,11 +26,17 @@ public class User {
 
     private Long customerId;
 
-    @Column(unique = true, nullable = false)
+    @Column(nullable = false, length=320)
     private String email;
+
+    @Column(name = "email_normalized", unique = true, nullable = false,length = 320)
+    private String emailNormalized;
+
 
     @Column(nullable = false)
     private String passwordHash;
+
+    private Instant passwordChangedAt;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
@@ -34,24 +46,33 @@ public class User {
     @Column(nullable = false)
     private Status status;
 
-    private LocalDateTime lastLogin;
+    private Instant lastLogin;
 
     private int failedLoginAttempt;
 
-    private LocalDateTime created;
+    private Instant lockedUntil;//needed for lockout
 
-    private LocalDateTime updated;
+    private Instant created;
+
+    private Instant updated;
 
     @PrePersist
     public void prePersist() {
-        created = LocalDateTime.now();
-        updated = LocalDateTime.now();
+        Instant now = Instant.now();
+        created = now;
+        updated = now;
+        emailNormalized=normalizeEmail(email);
     }
 
     @PreUpdate
     public void preUpdate() {
-        updated = LocalDateTime.now();
+        Instant now = Instant.now();
+        updated = now;
+        emailNormalized=normalizeEmail(email);
     }
 
+   private static String normalizeEmail(String email) {
+        return email == null ? null : email.trim().toLowerCase();
+    }
 
 }

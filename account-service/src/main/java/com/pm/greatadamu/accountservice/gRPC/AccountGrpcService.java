@@ -101,16 +101,43 @@ public class AccountGrpcService extends AccountServiceGrpc.AccountServiceImplBas
     public void updateBalance(UpdateBalanceRequest request,
                               StreamObserver<UpdateBalanceResponse> responseObserver) {
         long accountId = request.getAccountId();
-        BigDecimal amount = new BigDecimal(request.getAmount());
         OperationType operation = request.getOperation();
         String description = request.getDescription();
 
+        //parse amount safely + validate
+        final BigDecimal amount;
+        try {
+            String rawAmount = request.getAmount();
+
+            if (rawAmount == null || rawAmount.isBlank()) {
+                responseObserver.onError(Status.INVALID_ARGUMENT
+                .withDescription("Amount required")
+                        .asRuntimeException());
+                return;
+            }
+            amount = new BigDecimal(rawAmount);
+
+            if (amount.compareTo(BigDecimal.ZERO) <= 0) {
+                //amount must be >0
+                responseObserver.onError(Status.INVALID_ARGUMENT
+                .withDescription("Amount must be greater than zero")
+                        .asRuntimeException());
+                return;
+            }
+        }catch (NumberFormatException e) {
+            //handle bad numbers properly
+            responseObserver.onError(Status.INVALID_ARGUMENT
+                    .withDescription("Invalid amount format")
+                    .asRuntimeException());
+            return;
+
+        }
         log.info("gRPC Server: {} {} for account ID: {}",
                 operation == OperationType.DEBIT ? "Debiting" : "Crediting",
                 amount, accountId);
 
         try {
-            Account account = accountRepository.findById(accountId)
+            Account account = accountRepository.findByIdForUpdate(accountId)
                     .orElseThrow(() -> new RuntimeException("Account not found"));
 
             BigDecimal currentBalance = account.getAccountBalance();
@@ -119,17 +146,24 @@ public class AccountGrpcService extends AccountServiceGrpc.AccountServiceImplBas
             if (operation == OperationType.DEBIT) {
                 // Subtract from balance
                 if (currentBalance.compareTo(amount) < 0) {
-                    throw new RuntimeException("Insufficient balance. Current: " +
-                            currentBalance + ", Required: " + amount);
+                    responseObserver.onError(Status.FAILED_PRECONDITION
+                            .withDescription("Insufficient funds. Current: "  + currentBalance + ", Required: " + amount)
+                    .asRuntimeException());
+                    return;
                 }
                 newBalance = currentBalance.subtract(amount);
                 log.info("gRPC Server: Debiting {} from account {}. Current: {}, New: {}",
                         amount, accountId, currentBalance, newBalance);
-            } else {
+            } else if (operation == OperationType.CREDIT) {
                 // Add to balance
                 newBalance = currentBalance.add(amount);
                 log.info("gRPC Server: Crediting {} to account {}. Current: {}, New: {}",
                         amount, accountId, currentBalance, newBalance);
+            }else {
+                responseObserver.onError(Status.INVALID_ARGUMENT
+                        .withDescription("Unknown operation type")
+                        .asRuntimeException());
+                return;
             }
 
             // Update balance
@@ -147,17 +181,18 @@ public class AccountGrpcService extends AccountServiceGrpc.AccountServiceImplBas
             responseObserver.onNext(response);
             responseObserver.onCompleted();
 
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
+            if ("Acount not found".equals(e.getMessage())) {
+                responseObserver.onError(Status.NOT_FOUND
+                        .withDescription(e.getMessage())
+                        .asRuntimeException());
+                return;
+            }
             log.error("gRPC Server: Error updating balance for account {}: {}", accountId, e.getMessage());
 
-            UpdateBalanceResponse response = UpdateBalanceResponse.newBuilder()
-                    .setSuccess(false)
-                    .setNewBalance("0")
-                    .setMessage("Error: " + e.getMessage())
-                    .build();
-
-            responseObserver.onNext(response);
-            responseObserver.onCompleted();
+            responseObserver.onError(Status.INTERNAL
+                    .withDescription("Error updating balance: " + e.getMessage())
+                    .asRuntimeException());
         }
     }
 }

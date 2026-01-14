@@ -3,23 +3,32 @@ package com.pm.greatadamu.authservice.service;
 import com.pm.greatadamu.authservice.dto.CreateAuthResponse;
 import com.pm.greatadamu.authservice.dto.CreateUserLoginDTO;
 import com.pm.greatadamu.authservice.dto.CreateUserRegistrationRequestDTO;
+import com.pm.greatadamu.authservice.exception.AccountLockedException;
 import com.pm.greatadamu.authservice.exception.InvalidCredentialsException;
 import com.pm.greatadamu.authservice.exception.UserAlreadyExistsException;
 import com.pm.greatadamu.authservice.exception.UserDeactivatedException;
 import com.pm.greatadamu.authservice.jwtUtil.JwtService;
+import com.pm.greatadamu.authservice.jwtUtil.TokenHashUtil;
 import com.pm.greatadamu.authservice.kafka.CustomerEvent;
+import com.pm.greatadamu.authservice.model.RefreshToken;
 import com.pm.greatadamu.authservice.model.Role;
 import com.pm.greatadamu.authservice.model.Status;
 import com.pm.greatadamu.authservice.model.User;
+import com.pm.greatadamu.authservice.repository.RefreshTokenRepository;
 import com.pm.greatadamu.authservice.repository.UserRepository;
 import jakarta.transaction.Transactional;
 import lombok.Builder;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
+
+import java.security.SecureRandom;
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.Base64;
 import java.util.Optional;
 
 @Service
@@ -27,14 +36,22 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class AuthService {
     private final UserRepository userRepository;
+    private final RefreshTokenRepository refreshTokenRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
+
     private static final int MAX_FAILED_ATTEMPTS = 5;
+
+    @Value("${auth.refresh.expiration-seconds}")
+    private long refreshExpirationSeconds;
+
+    private final SecureRandom secureRandom = new SecureRandom();
 
     @Transactional
     public void register(CreateUserRegistrationRequestDTO createUserRegistrationRequestDTO) {
         //email must be unique
-        if (userRepository.existsByEmail(createUserRegistrationRequestDTO.getEmail())) {
+
+        if (userRepository.existsByEmailNormalized(createUserRegistrationRequestDTO.getEmail().trim().toLowerCase())) {
             throw new UserAlreadyExistsException( "Email already exists");
         }
         // hash the raw password from DTO
@@ -55,63 +72,19 @@ public class AuthService {
         userRepository.save(user);
     }
 
-@Transactional
-    public CreateAuthResponse login(CreateUserLoginDTO createUserLoginDTO) {
-        //find email from db
-        User user = userRepository.findByEmail(createUserLoginDTO.getEmail())
-                .orElseThrow(() -> new InvalidCredentialsException("Invalid email or password"));
-
-        //check if deactivated
-        if (user.getStatus()== Status.DEACTIVATED){
-            throw new UserDeactivatedException("User is already deactivated");
-        }
-
-        //verify password
-        boolean passwordMatches = passwordEncoder.matches(
-                createUserLoginDTO.getPassword(),
-                user.getPasswordHash());
-
-        if (!passwordMatches) {
-            int attempts =user.getFailedLoginAttempt()+1;
-            user.setFailedLoginAttempt(attempts);
-
-            // lock account after 5 failed attempts
-            if (attempts >= MAX_FAILED_ATTEMPTS) {
-                user.setStatus(Status.DEACTIVATED);
-                userRepository.save(user);
-                throw new UserDeactivatedException("User is deactivated");
-            }
-
-            userRepository.save(user);
-            throw new InvalidCredentialsException(
-                   String.format("Invalid credentials. Attempt %d of %d", attempts, MAX_FAILED_ATTEMPTS));
-        }
-
-        // success: reset attempts, update lastLogin
-        user.setFailedLoginAttempt(0);
-        user.setLastLogin(LocalDateTime.now());
-        userRepository.save(user);
-
-        //call JWT
-        String token = jwtService.generateToken(user);
-
-        return CreateAuthResponse.builder()
-                .accessToken(token)
-                .tokenType("Bearer")
-                .userId(user.getId())
-                .customerId(user.getCustomerId())
-                .email(user.getEmail())
-                .role(user.getRole().name())
-                .expiresIn(jwtService.getExpirationMs())
-                .build();
+    @Transactional
+    public CreateAuthResponse login(CreateUserLoginDTO createUserLoginDTO)  {
+       return loginWithRefresh(createUserLoginDTO).response();
     }
+
+
     @Transactional
     public void updateCustomerIdFromEvent(CustomerEvent customerEvent) {
         log.info("Processing CustomerEvent for email: {}, customerId: {}",
-                customerEvent.getEmail(),customerEvent.getCustomerId());
+                customerEvent.getEmail().trim().toLowerCase(),customerEvent.getCustomerId());
 
         //find by email
-        Optional<User> userOptional = userRepository.findByEmail(customerEvent.getEmail());
+        Optional<User> userOptional = userRepository.findByEmailNormalized(customerEvent.getEmail().trim().toLowerCase());
 
         if (userOptional.isPresent()) {
             User user = userOptional.get();
@@ -130,10 +103,175 @@ public class AuthService {
                     customerEvent.getEmail());
         }
 
+    }
+
+    /// REFRESH TOKEN
+
+    //helper to generate secure random token string
+    private String generateRefreshToken(){
+        byte[] bytes = new byte[64];
+        secureRandom.nextBytes(bytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+    @Transactional
+    public LoginResult loginWithRefresh(CreateUserLoginDTO dto){
+        User user = userRepository.findByEmailNormalized(dto.getEmail().trim().toLowerCase())
+                .orElseThrow(() -> new InvalidCredentialsException("Invalid email or password"));
+
+        //status check
+        if(user.getStatus()== Status.DELETED) throw new InvalidCredentialsException("Invalid email or password");
+        if (user.getStatus()==Status.PENDING_VERIFICATION) throw new UserDeactivatedException("Account not verified");
+        if (user.getStatus()== Status.DISABLED) throw new UserDeactivatedException("User is already disabled");
 
 
+        if (user.getStatus()== Status.LOCKED) {
+            if (user.getLockedUntil() !=null && user.getLockedUntil().isAfter(Instant.now())){
+                throw new AccountLockedException("Account is temporary Locked");
+            }
 
+            //auto unlock
+            user.setStatus(Status.ACTIVE);
+            user.setLockedUntil(null);
+            user.setFailedLoginAttempt(0);
+            userRepository.save(user);
+        }
+
+        boolean ok = passwordEncoder.matches(dto.getPassword(),user.getPasswordHash());
+        if (!ok) {
+            int attempts =user.getFailedLoginAttempt()+1;
+            user.setFailedLoginAttempt(attempts);
+
+            if (attempts >= MAX_FAILED_ATTEMPTS) {
+                user.setStatus(Status.LOCKED);
+                user.setLockedUntil(Instant.now().plusSeconds(600) );
+                userRepository.save(user);
+                throw new AccountLockedException("Account is temporary locked");
+            }
+             userRepository.save(user);
+            throw new InvalidCredentialsException("Invalid email or password");
+        }
+
+        user.setFailedLoginAttempt(0);
+        user.setLastLogin(Instant.now());
+        userRepository.save(user);
+
+        String accessToken = jwtService.generateToken(user);
+
+         refreshTokenRepository.revokeAllActiveByUserId(user.getId(), Instant.now());
+
+        //create refresh token(raw + hashed store)
+        String rawRefreshToken = generateRefreshToken();
+        String refreshHash = TokenHashUtil.hashRefreshToken(rawRefreshToken);
+
+        RefreshToken refreshToken = RefreshToken.builder()
+                .user(user)
+                .tokenHash(refreshHash)
+                .createdAt(Instant.now())
+                .expiresAt(Instant.now().plusSeconds(refreshExpirationSeconds))
+                .revokedAt(null)
+                .build();
+
+        refreshTokenRepository.save(refreshToken);
+
+        CreateAuthResponse response = CreateAuthResponse.builder()
+                .accessToken(accessToken)
+                .tokenType("Bearer")
+                .userId(user.getId())
+                .customerId(user.getCustomerId())
+                .email(user.getEmail())
+                .role(user.getRole().name())
+                .expiresIn(jwtService.getExpirationMs())
+                .build();
+
+        return new LoginResult(response, rawRefreshToken);
+    }
+
+    //Refresh endpoint (rotate refresh token)
+    @Transactional
+    public LoginResult refreshAccessToken(String rawRefreshToken){
+        if (rawRefreshToken == null || rawRefreshToken.isBlank()){
+            throw new InvalidCredentialsException("Invalid refresh token");
+        }
+
+        String refreshHash=TokenHashUtil.hashRefreshToken(rawRefreshToken);
+
+        RefreshToken tokenRow = refreshTokenRepository.findByTokenHash(refreshHash)
+                .orElseThrow(() -> new  InvalidCredentialsException("Invalid refresh token"));
+
+        // reuse detection (possible token theft)
+        if (tokenRow.getRevokedAt() != null) {
+            // revoke all refresh tokens for that user to force full re-login everywhere
+            refreshTokenRepository.revokeAllActiveByUserId(tokenRow.getUser().getId(), Instant.now());
+            throw new InvalidCredentialsException("Invalid refresh token");
+        }
+
+
+        if (tokenRow.getExpiresAt().isBefore(Instant.now())) {
+            throw new InvalidCredentialsException("Refresh token expired");
+        }
+
+        User user = tokenRow.getUser();
+
+        //Enforce DB status here
+       // allow auto-unlock here too (same behavior as login)
+        if (user.getStatus() == Status.LOCKED) {
+            if (user.getLockedUntil() != null && user.getLockedUntil().isAfter(Instant.now())) {
+                throw new AccountLockedException("Account is temporary Locked");
+            }
+            user.setStatus(Status.ACTIVE);
+            user.setLockedUntil(null);
+            user.setFailedLoginAttempt(0);
+            userRepository.save(user);
+        }
+
+        //block the real “hard blocks”
+        if (user.getStatus() == Status.DELETED) throw new InvalidCredentialsException("Invalid refresh token");
+        if (user.getStatus() == Status.PENDING_VERIFICATION) throw new UserDeactivatedException("Account not verified");
+        if (user.getStatus() == Status.DISABLED) throw new UserDeactivatedException("User is disabled");
+
+        //revoke old refresh token and mint new one
+        tokenRow.setRevokedAt(Instant.now());
+        refreshTokenRepository.save(tokenRow);
+
+        String newRawRefreshToken = generateRefreshToken();
+        String newHash = TokenHashUtil.hashRefreshToken(newRawRefreshToken);
+
+        RefreshToken newRow = RefreshToken.builder()
+                .user(user)
+                .tokenHash(newHash)
+                .createdAt(Instant.now())
+                .expiresAt(Instant.now().plusSeconds(refreshExpirationSeconds))
+                .revokedAt(null)
+                .build();
+        refreshTokenRepository.save(newRow);
+
+        String newAccessToken = jwtService.generateToken(user);
+
+        CreateAuthResponse response = CreateAuthResponse.builder()
+                .accessToken(newAccessToken)
+                .tokenType("Bearer")
+                .userId(user.getId())
+                .customerId(user.getCustomerId())
+                .email(user.getEmail())
+                .role(user.getRole().name())
+                .expiresIn(jwtService.getExpirationMs())
+                .build();
+
+        return new LoginResult(response, newRawRefreshToken);
 
 
     }
+   //logout revokes refresh token
+    @Transactional
+    public void logout(String rawRefreshToken) {
+        if (rawRefreshToken == null || rawRefreshToken.isBlank()) return;
+
+        String refreshHash = TokenHashUtil.hashRefreshToken(rawRefreshToken);
+        refreshTokenRepository.findByTokenHash(refreshHash).ifPresent(row -> {
+            row.setRevokedAt(Instant.now());
+            refreshTokenRepository.save(row);
+        });
+    }
+//small result wrapper (response + refresh token for cookie)
+    public record LoginResult(CreateAuthResponse response, String refreshToken) {}
 }

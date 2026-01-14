@@ -102,6 +102,14 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: finance-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - finance-network
+
   # KAFKA INFRASTRUCTURE
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0

@@ -2,11 +2,11 @@ POST localhost:8084/api/customers
 Content-Type: application/json
 
 {
-  "firstName": "izuora",
-  "lastName": "divine",
-  "email": "dee@test.com",
-  "phoneNumber": "555-1111",
-  "address": "111 Pine St"
+  "firstName": "brian",
+  "lastName": "knight",
+  "email": "brianKnight@test.com",
+  "phoneNumber": "204-922-2361",
+  "address": "224 mcdiarmid drive"
 }
 
 ###

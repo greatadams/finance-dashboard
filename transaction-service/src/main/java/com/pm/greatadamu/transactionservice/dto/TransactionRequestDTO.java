@@ -18,6 +18,8 @@ public class TransactionRequestDTO {
     @NotNull
     private Long customerId;
 
+    private String idempotencyKey;
+
     @NotNull
     private BigDecimal amount;
 

@@ -4,6 +4,7 @@ import com.pm.greatadamu.grpc.account.UpdateBalanceResponse;
 import com.pm.greatadamu.grpc.account.ValidateAccountResponse;
 import com.pm.greatadamu.transactionservice.dto.TransactionRequestDTO;
 import com.pm.greatadamu.transactionservice.dto.TransactionResponseDTO;
+import com.pm.greatadamu.transactionservice.exception.IdempotencyConflictReturnExisting;
 import com.pm.greatadamu.transactionservice.gRPC.AccountGrpcClient;
 import com.pm.greatadamu.transactionservice.kafka.TransactionEvent;
 import com.pm.greatadamu.transactionservice.kafka.TransactionEventProducer;
@@ -11,6 +12,8 @@ import com.pm.greatadamu.transactionservice.mapper.TransactionMapper;
 import com.pm.greatadamu.transactionservice.model.Transaction;
 import com.pm.greatadamu.transactionservice.model.TransactionStatus;
 import com.pm.greatadamu.transactionservice.repository.TransactionRepository;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -27,7 +30,7 @@ public class TransactionServices {
     private final TransactionMapper transactionMapper;
     private final TransactionEventProducer transactionEventProducer;
     private final AccountGrpcClient accountGrpcClient;
-
+    private final TransactionPersistenceService transactionPersistenceService;
 
     //Return Transaction record from dB
     public List<TransactionResponseDTO> getTransactions() {
@@ -41,19 +44,40 @@ public class TransactionServices {
                 .toList();
     }
 
-    /**
-     * Create a Transaction with gRPC validation and balance updates
-     */
+
+
     @Transactional
     public TransactionResponseDTO createTransaction(TransactionRequestDTO dto) {
         log.info("Creating transaction: {} from account {} to account {}",
                 dto.getAmount(),
                 dto.getFromAccountId(),
                 dto.getToAccountId());
+        //validate amount early
+        if (dto.getAmount() == null || dto.getAmount().signum() <= 0) {
+            throw new IllegalArgumentException("Amount must be greater than zero");
+        }
+
+        // CHANGE: Idempotency (prevents duplicate transfer if request retries)
+        // Assumption: dto has an idempotencyKey OR you generate one and pass from controller.
+        // If you don't have it in dto yet, add it.
+        String idemKey = dto.getIdempotencyKey();
+        if (idemKey == null || idemKey.isBlank()) {
+            throw new IllegalArgumentException("Idempotency key is required");
+        }
+
+        //  if this key already exists, return existing transaction (NO double debit)
+        transactionRepository.findByIdempotencyKey(idemKey)
+                .map(transactionMapper::mapToResponseDTO)
+                .ifPresent(existing -> { throw new IdempotencyConflictReturnExisting (existing); });
 
         // ========== STEP 1: Validate Source Account ==========
-        ValidateAccountResponse sourceValidation =
-                accountGrpcClient.validateAccount(dto.getFromAccountId());
+        ValidateAccountResponse sourceValidation;
+       try{
+         sourceValidation=  accountGrpcClient.validateAccount(dto.getFromAccountId());
+       }catch (StatusRuntimeException e){
+           throw new RuntimeException("Account validation failed (source): " + e.getStatus(), e);
+       }
+
 
         if (!sourceValidation.getExists()) {
             throw new RuntimeException("Source account not found");
@@ -63,8 +87,13 @@ public class TransactionServices {
         }
 
         // ========== STEP 2: Validate Destination Account ==========
-        ValidateAccountResponse destValidation =
-                accountGrpcClient.validateAccount(dto.getToAccountId());
+        ValidateAccountResponse destValidation;
+        try{
+           destValidation= accountGrpcClient.validateAccount(dto.getToAccountId());
+        }catch (StatusRuntimeException e){
+            throw new RuntimeException("Account validation failed (dest): " + e.getStatus(), e);
+        }
+
 
         if (!destValidation.getExists()) {
             throw new RuntimeException("Destination account not found");
@@ -78,28 +107,46 @@ public class TransactionServices {
         transaction.setTransactionStatus(TransactionStatus.PENDING);
         transaction.setTransactionDate(LocalDateTime.now());
 
+        //store idempotency key on the entity (must exist in your Transaction model)
+        transaction.setIdempotencyKey(idemKey);
+
         // Save transaction as PENDING
-        Transaction savedTransaction = transactionRepository.save(transaction);
+        Transaction savedTransaction = transactionPersistenceService.savePending(transaction);
         log.info("Transaction created with ID: {} and status: PENDING", savedTransaction.getId());
 
-        try {
+
             // ========== STEP 4: Debit Source Account via gRPC ==========
             String description = "Transaction #" + savedTransaction.getId();
-            UpdateBalanceResponse debitResponse = accountGrpcClient.debitAccount(
+        UpdateBalanceResponse debitResponse;
+        try {
+             debitResponse = accountGrpcClient.debitAccount(
                     dto.getFromAccountId(),
                     dto.getAmount(),
                     description
             );
 
-            if (!debitResponse.getSuccess()) {
-                throw new RuntimeException("Failed to debit source account: " + debitResponse.getMessage());
+        }catch (StatusRuntimeException e){
+            // map key gRPC statuses to meaningful messages
+            if (e.getStatus().getCode() == Status.Code.FAILED_PRECONDITION) {
+                throw new RuntimeException("Insufficient funds", e);
             }
-
-            log.info("Source account {} debited. New balance: {}",
-                    dto.getFromAccountId(), debitResponse.getNewBalance());
+            if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
+                throw new RuntimeException("Source account not found", e);
+            }
+            if (e.getStatus().getCode() == Status.Code.DEADLINE_EXCEEDED) {
+                throw new RuntimeException("Debit timed out; try again", e);
+            }
+            throw new RuntimeException("Debit failed: " + e.getStatus(), e);
+        }
+        // If you updated account-service to use gRPC Status errors,
+        // debitResponse.getSuccess() will always be true on success, otherwise exception thrown.
+        log.info("Source account {} debited. New balance: {}",
+                dto.getFromAccountId(), debitResponse.getNewBalance());
 
             // ========== STEP 5: Credit Destination Account via gRPC ==========
-            UpdateBalanceResponse creditResponse = accountGrpcClient.creditAccount(
+        UpdateBalanceResponse creditResponse;
+        try{
+            creditResponse = accountGrpcClient.creditAccount(
                     dto.getToAccountId(),
                     dto.getAmount(),
                     description
@@ -122,7 +169,7 @@ public class TransactionServices {
             // ========== STEP 6: Update Transaction to COMPLETED ==========
             savedTransaction.setTransactionStatus(TransactionStatus.COMPLETED);
             savedTransaction.setTransactionDate(LocalDateTime.now());
-            transactionRepository.save(savedTransaction);
+            savedTransaction=transactionPersistenceService.markCompleted(savedTransaction);
 
             log.info("Transaction {} completed successfully", savedTransaction.getId());
 
@@ -143,7 +190,7 @@ public class TransactionServices {
             log.error("Transaction {} failed: {}", savedTransaction.getId(), e.getMessage());
             savedTransaction.setTransactionStatus(TransactionStatus.FAILED);
             savedTransaction.setTransactionDate(LocalDateTime.now());
-            transactionRepository.save(savedTransaction);
+            transactionPersistenceService.markFailed(savedTransaction,e.getMessage());
 
             throw new RuntimeException("Transaction failed: " + e.getMessage());
         }

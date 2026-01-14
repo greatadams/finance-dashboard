@@ -2,10 +2,10 @@ POST http://localhost:8081/api/transactions
 Content-Type: application/json
 
 {
-  "customerId": 1,
-  "amount": 100.00,
-  "fromAccountId": 1,
+  "customerId": 10,
+  "amount": 1000.00,
+  "fromAccountId": 10,
   "toAccountId": 2,
-  "description": "Test transfer Alice to Bob",
+  "description": "Test transfer",
   "transactionType": "TRANSFER"
 }

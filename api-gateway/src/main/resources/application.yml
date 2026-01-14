@@ -1,0 +1,83 @@
+server:
+  port: ${SERVER_PORT:8086}
+
+spring:
+  application:
+    name: api-gateway
+
+  redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+
+  cloud:
+    gateway:
+      forwarded:
+        enabled: true
+
+      httpclient:
+        connect-timeout: 2000
+        response-timeout: 5s
+
+      globalcors:
+        corsConfigurations:
+          "[/**]":
+            allowedOrigins:
+              - "https://your-frontend.com"
+              - "http://localhost:5173"
+            allowedMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+            allowedHeaders:
+              - Authorization
+              - Content-Type
+              - X-Requested-With
+              - Accept
+              - Origin
+            allowCredentials: true
+
+      routes:
+         # -----------------------
+         # AUTH SERVICE ROUTE
+         # -----------------------
+        - id: auth-service
+          uri: ${AUTH_SERVICE_URI:http://localhost:8085}
+          predicates:
+            - Path=/api/auth/**
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 10
+                redis-rate-limiter.burstCapacity: 20
+                key-resolver: "#{@ipKeyResolver}"
+            - name: CircuitBreaker
+              args:
+                name: authCB
+                fallbackUri: forward:/fallback/auth
+
+        # -----------------------
+        # ACCOUNT SERVICE ROUTE
+        # -----------------------
+        - id: account-service
+          uri: ${ACCOUNT_SERVICE_URI:http://localhost:8082}
+          predicates:
+            - Path=/api/accounts/**
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 30
+                redis-rate-limiter.burstCapacity: 60
+                key-resolver: "#{@userOrIpKeyResolver}"
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${JWKS_URI:http://localhost:8085/.well-known/jwks.json}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true

@@ -1,0 +1,5 @@
+###
+# curl http://localhost:8085/.well-known/jwks.json
+GET http://localhost:8085/.well-known/jwks.json
+
+###
